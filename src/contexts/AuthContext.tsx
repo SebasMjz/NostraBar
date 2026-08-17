@@ -21,6 +21,7 @@ interface AuthValue {
   listUsers: () => Promise<UserProfile[]>;
   toggleUserActive: (userId: string, active: boolean) => Promise<{ error?: string }>;
   deleteUser: (userId: string) => Promise<{ error?: string }>;
+  changePassword: (newPassword: string) => Promise<{ error?: string }>;
 }
 
 const AuthContext = createContext<AuthValue | null>(null);
@@ -181,8 +182,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return {};
   }, [listUsers]);
 
+  const changePassword = useCallback(async (newPassword: string) => {
+    if (!user) return { error: 'No hay sesión activa' };
+
+    const updatedUser = { ...user, password: newPassword };
+    setUser(updatedUser);
+    localStorage.setItem('nostrabar_current_user', JSON.stringify(updatedUser));
+
+    const users = await listUsers();
+    const updatedUsers = users.map((u) => u.id === user.id ? { ...u, password: newPassword } : u);
+    saveLocalUsers(updatedUsers);
+
+    try {
+      await supabase.from('profiles').update({ password: newPassword } as any).eq('id', user.id);
+    } catch (e) {
+      console.warn('Supabase password update fallback:', e);
+    }
+
+    return {};
+  }, [user, listUsers]);
+
   return (
-    <AuthContext.Provider value={{ user, loading, signIn, signOut, createUser, listUsers, toggleUserActive, deleteUser }}>
+    <AuthContext.Provider value={{ user, loading, signIn, signOut, createUser, listUsers, toggleUserActive, deleteUser, changePassword }}>
       {children}
     </AuthContext.Provider>
   );

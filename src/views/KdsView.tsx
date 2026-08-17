@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { CheckCircle2, ChefHat, Clock, Soup } from 'lucide-react';
-import { destLabel, getTableName, useStore } from '@/store';
+import { getTableName, useStore } from '@/store';
 import type { Order, Table } from '@/types';
 
 type KdsFilter = 'all' | 'barra' | 'cocina';

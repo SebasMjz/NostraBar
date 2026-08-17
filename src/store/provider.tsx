@@ -1,9 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { CategoryItem, CategoryKey, Order, OrderDestination, OrderItem, OrderItemExtra, PaymentMethod, PaymentSplit, Product, Role, Table, Transaction } from '@/types';
+import type { CategoryItem, Order, OrderDestination, OrderItem, OrderItemExtra, PaymentSplit, Product, Role, Table, Transaction } from '@/types';
 import {
   categoriesService,
   productsService,
-  variantsService,
   modifiersService,
   tablesService,
   ordersService,
@@ -11,9 +10,9 @@ import {
   paymentsService,
   cashRegisterService,
   realtimeService,
-  supabase,
 } from '@/lib/supabase';
-import type { Category, Product as DbProduct, ProductVariant as DbVariant, Modifier as DbModifier, RestaurantTable as DbTable, Order as DbOrder, OrderItem as DbOrderItem } from '@/types/database';
+import { mapCategory, mapProduct, mapTable, mapOrder, uid, newTicket, setTicketSeq } from '@/store/mappers';
+import { destLabel, money } from '@/lib/format';
 
 interface StoreValue {
   role: Role;
@@ -38,7 +37,6 @@ interface StoreValue {
   orders: Order[];
   transactions: Transaction[];
 
-  // POS comanda activa
   activeItems: OrderItem[];
   activeDestination: OrderDestination;
   setActiveDestination: (d: OrderDestination) => void;
@@ -51,26 +49,21 @@ interface StoreValue {
   discount: number;
   setDiscount: (n: number) => void;
 
-  // Pedidos
   sendToKitchen: () => Promise<void>;
   addItemToOrder: (orderId: string, p: Product, modifiers?: string[], extras?: OrderItemExtra[]) => void;
   getOrderForTable: (tableId: string) => Order | undefined;
   payOrder: (orderId: string, payments: PaymentSplit[]) => Promise<void>;
   transferTable: (fromTableId: string, toTableId: string) => Promise<void>;
 
-  // KDS
   advanceOrder: (id: string) => void;
   toggleItemDone: (orderId: string, itemId: string) => void;
 
-  // Print
   printReceipt: (orderId: string) => void;
 
-  // Cash register
-  activeCashRegister: any | null;
+  activeCashRegister: any;
   openCashRegister: (initialAmount: number) => Promise<void>;
   closeCashRegister: (finalAmount: number, notes?: string) => Promise<void>;
 
-  // Ready alerts for mesero
   readyAlerts: string[];
   dismissReadyAlert: (tableId: string) => void;
 
@@ -78,109 +71,6 @@ interface StoreValue {
 }
 
 const StoreContext = createContext<StoreValue | null>(null);
-
-let ticketSeq = 1000;
-const newTicket = () => `T-${ticketSeq++}`;
-const uid = () => crypto.randomUUID();
-
-// ============================================
-// Conversion functions: Supabase → App types
-// ============================================
-const categoryKeyFromName = (name: string): CategoryKey => {
-  const map: Record<string, CategoryKey> = {
-    'espresso bar': 'espresso',
-    'filtrados': 'filtrados',
-    'bebidas frías': 'frias',
-    'bebidas frias': 'frias',
-    'pastelería': 'pasteleria',
-    'pasteleria': 'pasteleria',
-    'lácteos': 'lacteos',
-    'lacteos': 'lacteos',
-    'descartables': 'descartables',
-    'extras': 'extras',
-  };
-  return map[name.toLowerCase()] || name.toLowerCase().replace(/\s+/g, '_').slice(0, 15) as CategoryKey;
-};
-
-const emojiMap: Record<string, string> = {
-  'espresso bar': '☕',
-  'filtrados': '🫖',
-  'bebidas frías': '🧊',
-  'pastelería': '🥐',
-  'lácteos': '🥛',
-  'descartables': '📦',
-  'extras': '✨',
-};
-
-const mapCategory = (c: Category): CategoryItem => ({
-  id: c.id,
-  key: categoryKeyFromName(c.name),
-  name: c.name,
-  emoji: emojiMap[c.name.toLowerCase()] || '📦',
-});
-
-const mapProduct = (p: DbProduct & { variants?: DbVariant[]; category?: Category }, catMap: Record<string, CategoryItem>): Product => {
-  const cat = catMap[p.category_id];
-  const variants = (p.variants || []).map((v) => ({ name: v.name, price: v.price, available: v.available }));
-  const price = variants.length > 0 ? variants[0].price : 0;
-  return {
-    id: p.id,
-    name: p.name,
-    price,
-    category: cat?.key || 'extras',
-    stock: 100,
-    available: p.available,
-    variants,
-    modifiers: [],
-    availableExtras: [],
-  };
-};
-
-const mapTable = (t: DbTable): Table => ({
-  id: t.id,
-  number: t.number,
-  name: t.name || `Mesa ${t.number}`,
-  capacity: t.capacity,
-  available: t.status === 'available',
-});
-
-const mapOrder = (o: DbOrder & { items?: DbOrderItem[] }): Order => {
-  const items: OrderItem[] = (o.items || []).map((i) => ({
-    id: i.id,
-    productId: i.product_id,
-    name: i.name,
-    price: i.price,
-    qty: i.quantity,
-    modifiers: Array.isArray(i.modifiers) ? (i.modifiers as string[]) : [],
-    extras: [],
-    note: i.note || undefined,
-    done: i.done,
-  }));
-
-  const subtotal = items.reduce((s, i) => s + i.price * i.qty, 0);
-
-  let destination: OrderDestination;
-  if (o.destination_type === 'mesa' && o.table_id) {
-    destination = { type: 'mesa', tableId: o.table_id };
-  } else if (o.destination_type === 'barra') {
-    destination = { type: 'barra' };
-  } else {
-    destination = { type: 'llevar' };
-  }
-
-  return {
-    id: o.id,
-    ticket: o.ticket,
-    destination,
-    items,
-    status: o.status as Order['status'],
-    createdAt: new Date(o.created_at).getTime(),
-    subtotal,
-    discount: o.discount,
-    total: o.total,
-    paid: !!o.closed_at,
-  };
-};
 
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [role, setRole] = useState<Role>('admin');
@@ -191,7 +81,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [readyAlerts, setReadyAlerts] = useState<string[]>([]);
-  const [activeCashRegister, setActiveCashRegister] = useState<any | null>(null);
+  const [activeCashRegister, setActiveCashRegister] = useState<any>(null);
 
   const [activeItems, setActiveItems] = useState<OrderItem[]>([]);
   const [activeDestination, setActiveDestination] = useState<OrderDestination>({ type: 'mesa', tableId: '' });
@@ -200,15 +90,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const ordersRef = useRef(orders);
   ordersRef.current = orders;
 
-  // ============================================
-  // Load data from Supabase on mount (batch optimized)
-  // ============================================
   useEffect(() => {
     let mounted = true;
 
     async function loadAll() {
       try {
-        // 1. Load categories
         const dbCategories = await categoriesService.getAll();
         const catMap: Record<string, CategoryItem> = {};
         const mappedCategories = dbCategories.map((c) => {
@@ -217,18 +103,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           return mapped;
         });
 
-        // 2. Load products with variants
         const dbProducts = await productsService.getAll();
         const mappedProducts = dbProducts.map((p) => mapProduct(p as any, catMap));
 
-        // 3. Load ALL modifiers in ONE query (batch, not N+1)
         const modsByProduct = await modifiersService.getAllByProducts();
         for (const p of mappedProducts) {
           const mods = modsByProduct[p.id];
           if (mods) p.modifiers = mods.map((m) => m.name);
         }
 
-        // 4. Load extras configuration (persisted in localStorage)
         const storedExtras = localStorage.getItem('nostrabar_product_extras');
         const extrasConfig: Record<string, string[]> = storedExtras ? JSON.parse(storedExtras) : {};
         const extrasCat = mappedCategories.find((c) => c.key === 'extras');
@@ -245,21 +128,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }
         }
 
-        // 5. Load tables
         const dbTables = await tablesService.getAll();
         const mappedTables = dbTables.map(mapTable);
 
-        // 6. Load active orders
         const dbOrders = await ordersService.getActive();
         const mappedOrders = dbOrders.map(mapOrder);
 
-        // 7. Get max ticket from Supabase
         const maxTicket = await ordersService.getMaxTicket();
 
-        // 8. Check open cash register
         const openReg = await cashRegisterService.getOpen().catch(() => null);
 
-        // Set first table as default destination
         const firstTableId = mappedTables.length > 0 ? mappedTables[0].id : '';
 
         if (mounted) {
@@ -268,7 +146,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           setTables(mappedTables);
           setOrders(mappedOrders);
           setActiveDestination({ type: 'mesa', tableId: firstTableId });
-          ticketSeq = maxTicket + 1;
+          setTicketSeq(maxTicket + 1);
           setActiveCashRegister(openReg);
           setLoading(false);
         }
@@ -282,11 +160,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return () => { mounted = false; };
   }, []);
 
-  // ============================================
-  // Realtime subscriptions
-  // ============================================
   useEffect(() => {
     const orderSub = realtimeService.subscribeToOrders((payload) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const newOrder = payload as any;
       setOrders((prev) => {
         const exists = prev.find((o) => o.id === newOrder.id);
@@ -296,7 +172,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         if (exists) {
           return prev.map((o) => {
             if (o.id !== newOrder.id) return o;
-            return { ...o, status: newOrder.status, total: newOrder.total, discount: newOrder.discount };
+            return { ...o, status: newOrder.status as Order['status'], total: newOrder.total as number, discount: newOrder.discount as number };
           });
         }
         return prev;
@@ -304,6 +180,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     });
 
     const itemSub = realtimeService.subscribeToOrderItems((payload) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const item = payload as any;
       setOrders((prev) => prev.map((o) => {
         if (o.id !== item.order_id) return o;
@@ -316,6 +193,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     });
 
     const tableSub = realtimeService.subscribeToTables((payload) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const tbl = payload as any;
       setTables((prev) => prev.map((t) => t.id === tbl.id ? { ...t, status: tbl.status, number: tbl.number, name: tbl.name, capacity: tbl.capacity } : t));
     });
@@ -327,9 +205,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // ============================================
-  // Categories CRUD
-  // ============================================
   const addCategory = useCallback(async (cat: Omit<CategoryItem, 'id'>) => {
     try {
       const created = await categoriesService.create({ name: cat.name });
@@ -348,9 +223,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setCategories((prev) => prev.filter((c) => c.id !== id));
   }, []);
 
-  // ============================================
-  // Products CRUD
-  // ============================================
   const toggleAvailable = useCallback(async (id: string) => {
     const product = products.find((p) => p.id === id);
     if (!product) return;
@@ -360,7 +232,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [products]);
 
   const addProduct = useCallback(async (product: Omit<Product, 'id'>) => {
-    // For now, add locally. Full Supabase integration requires category UUID mapping.
     setProducts((prev) => [...prev, { ...product, id: uid() }]);
   }, []);
 
@@ -385,9 +256,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setProducts((prev) => prev.filter((p) => p.id !== id));
   }, []);
 
-  // ============================================
-  // Tables CRUD
-  // ============================================
   const addTable = useCallback(async (table: Omit<Table, 'id'>) => {
     try {
       const created = await tablesService.create({ number: table.number, name: table.name, capacity: table.capacity, status: 'available' });
@@ -411,14 +279,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // ============================================
-  // Orders
-  // ============================================
   const getOrderForTable = useCallback((tableId: string) => {
     return orders.find((o) => o.destination.type === 'mesa' && o.destination.tableId === tableId && !o.paid);
   }, [orders]);
 
-  // POS - Add to comanda (local state)
   const addToComanda = useCallback((p: Product, modifiers: string[] = [], extras: OrderItemExtra[] = []) => {
     if (!p.available) return;
     setActiveItems((prev) => {
@@ -466,7 +330,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [activeItems]);
   const total = Math.max(0, subtotal - discount);
 
-  // Send to kitchen (new order)
   const sendToKitchen = useCallback(async () => {
     if (activeItems.length === 0) return;
 
@@ -479,7 +342,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           : null;
 
     if (existingOrder) {
-      // Add items to existing order — only persist if order has a real Supabase ID
       const newItems = activeItems.map((i) => ({ ...i, id: uid(), done: false }));
       const newStatus = (existingOrder.status === 'despachado' || existingOrder.status === 'listo') ? 'nuevo' : existingOrder.status;
 
@@ -494,7 +356,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         return { ...o, items: updatedItems, subtotal: newSubtotal, total: Math.max(0, newSubtotal - o.discount), status: newStatus, createdAt: nowTime };
       }));
 
-      // Persist to Supabase
       try {
         for (const item of activeItems) {
           await orderItemsService.create({
@@ -526,7 +387,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         console.error('Error adding items to order:', err);
       }
     } else {
-      // Create new order — Supabase FIRST, then local state
       const ticket = newTicket();
 
       try {
@@ -542,9 +402,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           total,
         });
 
-        const realId = (created as any).id;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const realId = (created as any).id as string;
 
-        // Create order items in Supabase
         for (const item of activeItems) {
           await orderItemsService.create({
             order_id: realId,
@@ -558,12 +418,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           });
         }
 
-        // Update table status
         if (activeDestination.type === 'mesa') {
           await tablesService.updateStatus(activeDestination.tableId, 'occupied');
         }
 
-        // NOW add to local state with the real ID
         const order: Order = {
           id: realId,
           ticket,
@@ -578,13 +436,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         setOrders((prev) => [...prev, order]);
       } catch (err) {
         console.error('Error creating order in Supabase:', err);
-        // Revert ticket counter on failure
-        ticketSeq--;
       }
     }
   }, [activeItems, activeDestination, subtotal, discount, clearComanda]);
 
-  // Add items to existing order (from table view)
   const addItemToOrder = useCallback(async (orderId: string, p: Product, modifiers: string[] = [], extras: OrderItemExtra[] = []) => {
     const extrasTotal = extras.reduce((s, e) => s + e.price * e.qty, 0);
     const itemPrice = p.price + extrasTotal;
@@ -617,7 +472,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
     const order = orders.find((o) => o.id === orderId);
     if (order?.destination.type === 'mesa') {
-      const tId = (order.destination as any).tableId;
+      const tId = (order.destination as { tableId: string }).tableId;
       setTables((prev) => prev.map((t) => (t.id === tId ? { ...t, status: 'available' } : t)));
     }
 
@@ -641,7 +496,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         await paymentsService.create({ order_id: orderId, method: p.method, amount: p.amount });
       }
       if (order?.destination.type === 'mesa') {
-        await tablesService.updateStatus((order.destination as any).tableId, 'available');
+        await tablesService.updateStatus((order.destination as { tableId: string }).tableId, 'available');
       }
     } catch (err) {
       console.error('Error paying order in Supabase:', err);
@@ -649,13 +504,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [orders, tables]);
 
   const transferTable = useCallback(async (fromTableId: string, toTableId: string) => {
-    const order = ordersRef.current.find((o) => o.destination.type === 'mesa' && (o.destination as any).tableId === fromTableId && !o.paid);
+    const order = ordersRef.current.find((o) => o.destination.type === 'mesa' && (o.destination as { tableId: string }).tableId === fromTableId && !o.paid);
     if (!order) return;
 
     setOrders((prev) => prev.map((o) => o.id === order.id ? { ...o, destination: { type: 'mesa', tableId: toTableId } } : o));
     setTables((prev) => prev.map((t) => {
-      if (t.id === fromTableId) return { ...t, status: 'available' };
-      if (t.id === toTableId) return { ...t, status: 'occupied' };
+      if (t.id === fromTableId) return { ...t, status: 'available' as const };
+      if (t.id === toTableId) return { ...t, status: 'occupied' as const };
       return t;
     }));
 
@@ -681,7 +536,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const closeCashRegister = useCallback(async (finalAmount: number, notes?: string) => {
     if (!activeCashRegister) return;
     try {
-      await cashRegisterService.close(activeCashRegister.id, finalAmount, notes);
+      await cashRegisterService.close(activeCashRegister.id as string, finalAmount, notes);
     } catch (e) {
       console.error('Error closing cash register:', e);
     } finally {
@@ -700,7 +555,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (order) {
       const next = order.status === 'nuevo' ? 'preparacion' : order.status === 'preparacion' ? 'listo' : 'despachado';
       if (next === 'listo' && order.destination.type === 'mesa') {
-        const tId = (order.destination as any).tableId;
+        const tId = (order.destination as { tableId: string }).tableId;
         setReadyAlerts((prev) => [...prev.filter((a) => a !== order.destination.type + tId), order.destination.type + tId]);
       }
     }
@@ -715,9 +570,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     try { await orderItemsService.toggleDone(itemId); } catch (err) { console.error(err); }
   }, []);
 
-  // ============================================
-  // Print Receipt
-  // ============================================
   const printReceipt = useCallback((orderId: string) => {
     const order = ordersRef.current.find((o) => o.id === orderId);
     if (!order) return;
@@ -800,41 +652,3 @@ export function useStore() {
   if (!ctx) throw new Error('useStore must be used within StoreProvider');
   return ctx;
 }
-
-export const categoryLabels: Record<CategoryKey, string> = {
-  espresso: 'Espresso Bar',
-  filtrados: 'Filtrados',
-  frias: 'Bebidas Frías',
-  pasteleria: 'Pastelería',
-  lacteos: 'Lácteos',
-  descartables: 'Descartables',
-  extras: 'Extras',
-};
-
-export const categoryEmojis: Record<CategoryKey, string> = {
-  espresso: '☕',
-  filtrados: '🫖',
-  frias: '🧊',
-  pasteleria: '🥐',
-  lacteos: '🥛',
-  descartables: '📦',
-  extras: '✨',
-};
-
-export const posCategories: CategoryKey[] = ['espresso', 'filtrados', 'frias', 'pasteleria'];
-
-export function destLabel(d: OrderDestination, tables?: Table[]): string {
-  if (d.type === 'mesa') {
-    const table = tables?.find((t) => t.id === d.tableId);
-    return table ? table.name : `Mesa`;
-  }
-  if (d.type === 'barra') return 'Barra';
-  return 'Para Llevar';
-}
-
-export function getTableName(tables: Table[], tableId: string): string {
-  const table = tables.find((t) => t.id === tableId);
-  return table ? table.name : `Mesa ${tableId}`;
-}
-
-export const money = (n: number) => `Bs. ${n.toLocaleString('es-CO')}`;
