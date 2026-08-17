@@ -1,0 +1,35 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:wght@500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+  body {
+    @apply bg-stone-100 text-stone-800;
+  }
+  .font-sans {
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+  .font-serif {
+    font-family: 'Fraunces', Georgia, serif;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-stone-300 rounded-full;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-stone-400;
+}
