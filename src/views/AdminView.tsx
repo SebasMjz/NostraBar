@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeftRight,
@@ -10,6 +10,7 @@ import {
   LayoutGrid,
   Loader2,
   Plus,
+  Printer,
   Receipt,
   Settings,
   ShoppingCart,
@@ -42,6 +43,7 @@ export function AdminView() {
     products, toggleAvailable, addProduct, updateProduct, removeProduct,
     tables, addTable, updateTable, removeTable,
     orders, transactions,
+    printReceipt,
     activeCashRegister, openCashRegister, closeCashRegister,
   } = useStore();
   const { createUser, listUsers, toggleUserActive, deleteUser, user: currentUser } = useAuth();
@@ -637,7 +639,6 @@ export function AdminView() {
             </div>
           </div>
         )}
-      </main>
 
       {/* Modal Producto */}
       <ProductFormModal
@@ -891,8 +892,9 @@ export function AdminView() {
             </div>
           </div>
         )}
-      </div>
-    )}
+      </main>
+    </div>
+  );
 }
 
 // COMPONENTS

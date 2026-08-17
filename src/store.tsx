@@ -521,7 +521,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           subtotal: updatedSubtotal,
           total: updatedTotal,
           created_at: new Date().toISOString(),
-        });
+        } as any);
       } catch (err) {
         console.error('Error adding items to order:', err);
       }
